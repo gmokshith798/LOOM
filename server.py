@@ -15,21 +15,8 @@ DB_NAME = os.environ.get("POSTGRES_DB", "database_pandu")
 DB_USER = os.environ.get("POSTGRES_USER", "user_2871f50a")
 DB_PASS = os.environ.get("POSTGRES_PASSWORD", "pw_q17jTZgiwpzKPFqs1S2CdLpaqmBaudd0")
 
-GLOBAL_DB_CONN = None
-GLOBAL_DB_MODE = None
-
 def get_db():
-    global GLOBAL_DB_CONN, GLOBAL_DB_MODE, USE_POSTGRES
-    if GLOBAL_DB_CONN is not None:
-        try:
-            cursor = GLOBAL_DB_CONN.cursor()
-            if GLOBAL_DB_MODE == "pg":
-                cursor.execute("SELECT 1;")
-            cursor.close()
-            return GLOBAL_DB_CONN, GLOBAL_DB_MODE
-        except Exception:
-            GLOBAL_DB_CONN = None
-
+    global USE_POSTGRES
     # 1. Try PostgreSQL
     try:
         import psycopg2
@@ -40,19 +27,15 @@ def get_db():
             user=DB_USER,
             password=DB_PASS,
             sslmode="require",
-            connect_timeout=5
+            connect_timeout=4
         )
         conn.autocommit = True
         USE_POSTGRES = True
-        GLOBAL_DB_CONN = conn
-        GLOBAL_DB_MODE = "pg"
         return conn, "pg"
     except Exception as e:
         import sqlite3
         conn = sqlite3.connect("loom_data.db", check_same_thread=False)
         USE_POSTGRES = False
-        GLOBAL_DB_CONN = conn
-        GLOBAL_DB_MODE = "sqlite"
         return conn, "sqlite"
 
 def init_db():
@@ -65,6 +48,8 @@ def init_db():
                 value JSONB NOT NULL,
                 updated_at VARCHAR(100)
             );
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS files_kv (
                 file_id VARCHAR(200) PRIMARY KEY,
                 content TEXT NOT NULL,
@@ -79,6 +64,8 @@ def init_db():
                 value TEXT NOT NULL,
                 updated_at VARCHAR(100)
             );
+        """)
+        cursor.execute("""
             CREATE TABLE IF NOT EXISTS files_kv (
                 file_id VARCHAR(200) PRIMARY KEY,
                 content TEXT NOT NULL,
