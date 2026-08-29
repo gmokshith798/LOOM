@@ -15,10 +15,21 @@ DB_NAME = os.environ.get("POSTGRES_DB", "database_pandu")
 DB_USER = os.environ.get("POSTGRES_USER", "user_2871f50a")
 DB_PASS = os.environ.get("POSTGRES_PASSWORD", "pw_q17jTZgiwpzKPFqs1S2CdLpaqmBaudd0")
 
-USE_POSTGRES = False
+GLOBAL_DB_CONN = None
+GLOBAL_DB_MODE = None
 
 def get_db():
-    global USE_POSTGRES
+    global GLOBAL_DB_CONN, GLOBAL_DB_MODE, USE_POSTGRES
+    if GLOBAL_DB_CONN is not None:
+        try:
+            cursor = GLOBAL_DB_CONN.cursor()
+            if GLOBAL_DB_MODE == "pg":
+                cursor.execute("SELECT 1;")
+            cursor.close()
+            return GLOBAL_DB_CONN, GLOBAL_DB_MODE
+        except Exception:
+            GLOBAL_DB_CONN = None
+
     # 1. Try PostgreSQL
     try:
         import psycopg2
@@ -29,16 +40,19 @@ def get_db():
             user=DB_USER,
             password=DB_PASS,
             sslmode="require",
-            connect_timeout=4
+            connect_timeout=5
         )
         conn.autocommit = True
         USE_POSTGRES = True
+        GLOBAL_DB_CONN = conn
+        GLOBAL_DB_MODE = "pg"
         return conn, "pg"
     except Exception as e:
-        # Fallback to local SQLite database if PostgreSQL password/network needs configuration
         import sqlite3
         conn = sqlite3.connect("loom_data.db", check_same_thread=False)
         USE_POSTGRES = False
+        GLOBAL_DB_CONN = conn
+        GLOBAL_DB_MODE = "sqlite"
         return conn, "sqlite"
 
 def init_db():
@@ -51,6 +65,11 @@ def init_db():
                 value JSONB NOT NULL,
                 updated_at VARCHAR(100)
             );
+            CREATE TABLE IF NOT EXISTS files_kv (
+                file_id VARCHAR(200) PRIMARY KEY,
+                content TEXT NOT NULL,
+                updated_at VARCHAR(100)
+            );
         """)
         print(f"[OK] Connected to Wasmer PostgreSQL ({DB_HOST}:{DB_PORT}/{DB_NAME})")
     else:
@@ -58,6 +77,11 @@ def init_db():
             CREATE TABLE IF NOT EXISTS store_kv (
                 key VARCHAR(100) PRIMARY KEY,
                 value TEXT NOT NULL,
+                updated_at VARCHAR(100)
+            );
+            CREATE TABLE IF NOT EXISTS files_kv (
+                file_id VARCHAR(200) PRIMARY KEY,
+                content TEXT NOT NULL,
                 updated_at VARCHAR(100)
             );
         """)
@@ -124,6 +148,50 @@ def db_set_key(key, val):
             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;
         """, (key, val_json, now_str))
         conn.commit()
+
+def db_get_file(file_id):
+    conn, mode = get_db()
+    cursor = conn.cursor()
+    if mode == "pg":
+        cursor.execute("SELECT content FROM files_kv WHERE file_id = %s;", (file_id,))
+    else:
+        cursor.execute("SELECT content FROM files_kv WHERE file_id = ?;", (file_id,))
+    row = cursor.fetchone()
+    return row[0] if row else None
+
+def db_set_file(file_id, content):
+    conn, mode = get_db()
+    cursor = conn.cursor()
+    now_str = datetime.utcnow().isoformat()
+    if mode == "pg":
+        cursor.execute("""
+            INSERT INTO files_kv (file_id, content, updated_at)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (file_id) DO UPDATE SET content = EXCLUDED.content, updated_at = EXCLUDED.updated_at;
+        """, (file_id, content, now_str))
+    else:
+        cursor.execute("""
+            INSERT INTO files_kv (file_id, content, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(file_id) DO UPDATE SET content = excluded.content, updated_at = excluded.updated_at;
+        """, (file_id, content, now_str))
+        conn.commit()
+
+@app.route('/api/file/<file_id>', methods=['GET'])
+def get_file_content(file_id):
+    content = db_get_file(file_id)
+    if not content:
+        return jsonify({"error": "File not found"}), 404
+    return jsonify({"file_id": file_id, "content": content})
+
+@app.route('/api/file/<file_id>', methods=['PUT', 'POST'])
+def put_file_content(file_id):
+    payload = request.get_json(force=True, silent=True) or {}
+    content = payload.get("content") or request.data.decode('utf-8')
+    if not content:
+        return jsonify({"error": "Content required"}), 400
+    db_set_file(file_id, content)
+    return jsonify({"status": "ok", "file_id": file_id})
 
 @app.route('/api/store.json', methods=['GET'])
 @app.route('/api/store', methods=['GET'])
