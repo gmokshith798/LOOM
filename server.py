@@ -7,6 +7,7 @@ from flask_cors import CORS
 
 app = Flask(__name__)
 CORS(app)
+app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50 MB max upload
 
 # Wasmer PostgreSQL Database Configuration
 DB_HOST = os.environ.get("POSTGRES_HOST", "psql.fr-roub1.bengt.wasmernet.com")
@@ -17,7 +18,6 @@ DB_PASS = os.environ.get("POSTGRES_PASSWORD", "pw_q17jTZgiwpzKPFqs1S2CdLpaqmBaud
 
 def get_db():
     global USE_POSTGRES
-    # 1. Try PostgreSQL
     try:
         import psycopg2
         conn = psycopg2.connect(
@@ -39,40 +39,42 @@ def get_db():
         return conn, "sqlite"
 
 def init_db():
-    conn, mode = get_db()
-    cursor = conn.cursor()
-    if mode == "pg":
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS store_kv (
-                key VARCHAR(100) PRIMARY KEY,
-                value JSONB NOT NULL,
-                updated_at VARCHAR(100)
-            );
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS files_kv (
-                file_id VARCHAR(200) PRIMARY KEY,
-                content TEXT NOT NULL,
-                updated_at VARCHAR(100)
-            );
-        """)
-        print(f"[OK] Connected to Wasmer PostgreSQL ({DB_HOST}:{DB_PORT}/{DB_NAME})")
-    else:
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS store_kv (
-                key VARCHAR(100) PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at VARCHAR(100)
-            );
-        """)
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS files_kv (
-                file_id VARCHAR(200) PRIMARY KEY,
-                content TEXT NOT NULL,
-                updated_at VARCHAR(100)
-            );
-        """)
-        print("[INFO] Running with SQLite local database fallback (loom_data.db)")
+    try:
+        conn, mode = get_db()
+        cursor = conn.cursor()
+        if mode == "pg":
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS store_kv (
+                    key VARCHAR(100) PRIMARY KEY,
+                    value JSONB NOT NULL,
+                    updated_at VARCHAR(100)
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS files_kv (
+                    file_id VARCHAR(200) PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    updated_at VARCHAR(100)
+                );
+            """)
+        else:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS store_kv (
+                    key VARCHAR(100) PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at VARCHAR(100)
+                );
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS files_kv (
+                    file_id VARCHAR(200) PRIMARY KEY,
+                    content TEXT NOT NULL,
+                    updated_at VARCHAR(100)
+                );
+            """)
+            conn.commit()
+    except Exception as e:
+        print("[WARN] DB init notice:", str(e))
 
 # Initialize DB on start
 try:
@@ -81,54 +83,96 @@ except Exception as e:
     print("[WARN] DB init notice:", str(e))
 
 def db_get_all():
-    conn, mode = get_db()
-    cursor = conn.cursor()
-    store = {}
-    if mode == "pg":
+    try:
+        conn, mode = get_db()
+        cursor = conn.cursor()
+        store = {}
+        if mode == "pg":
+            cursor.execute("SELECT key, value FROM store_kv;")
+            rows = cursor.fetchall()
+            for k, v in rows:
+                store[k] = v if isinstance(v, (dict, list)) else json.loads(v)
+        else:
+            cursor.execute("SELECT key, value FROM store_kv;")
+            rows = cursor.fetchall()
+            for k, v in rows:
+                try:
+                    store[k] = json.loads(v)
+                except:
+                    store[k] = v
+        return store
+    except Exception as e:
+        print("[WARN] db_get_all fallback notice:", str(e))
+        import sqlite3
+        conn = sqlite3.connect("loom_data.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS store_kv (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);")
         cursor.execute("SELECT key, value FROM store_kv;")
         rows = cursor.fetchall()
+        store = {}
         for k, v in rows:
-            store[k] = v if isinstance(v, (dict, list)) else json.loads(v)
-    else:
-        cursor.execute("SELECT key, value FROM store_kv;")
-        rows = cursor.fetchall()
-        for k, v in rows:
-            try:
-                store[k] = json.loads(v)
-            except:
-                store[k] = v
-    return store
+            try: store[k] = json.loads(v)
+            except: store[k] = v
+        return store
 
 def db_get_key(key):
-    conn, mode = get_db()
-    cursor = conn.cursor()
-    if mode == "pg":
-        cursor.execute("SELECT value FROM store_kv WHERE key = %s;", (key,))
-        row = cursor.fetchone()
-        if row:
-            return row[0] if isinstance(row[0], (dict, list)) else json.loads(row[0])
-    else:
+    try:
+        conn, mode = get_db()
+        cursor = conn.cursor()
+        if mode == "pg":
+            cursor.execute("SELECT value FROM store_kv WHERE key = %s;", (key,))
+            row = cursor.fetchone()
+            if row:
+                return row[0] if isinstance(row[0], (dict, list)) else json.loads(row[0])
+        else:
+            cursor.execute("SELECT value FROM store_kv WHERE key = ?;", (key,))
+            row = cursor.fetchone()
+            if row:
+                try:
+                    return json.loads(row[0])
+                except:
+                    return row[0]
+        return None
+    except Exception as e:
+        print("[WARN] db_get_key fallback notice:", str(e))
+        import sqlite3
+        conn = sqlite3.connect("loom_data.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS store_kv (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);")
         cursor.execute("SELECT value FROM store_kv WHERE key = ?;", (key,))
         row = cursor.fetchone()
         if row:
-            try:
-                return json.loads(row[0])
-            except:
-                return row[0]
-    return None
+            try: return json.loads(row[0])
+            except: return row[0]
+        return None
 
 def db_set_key(key, val):
-    conn, mode = get_db()
-    cursor = conn.cursor()
-    val_json = json.dumps(val)
-    now_str = datetime.utcnow().isoformat()
-    if mode == "pg":
-        cursor.execute("""
-            INSERT INTO store_kv (key, value, updated_at)
-            VALUES (%s, %s, %s)
-            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at;
-        """, (key, val_json, now_str))
-    else:
+    try:
+        conn, mode = get_db()
+        cursor = conn.cursor()
+        val_json = json.dumps(val)
+        now_str = datetime.utcnow().isoformat()
+        if mode == "pg":
+            cursor.execute("""
+                INSERT INTO store_kv (key, value, updated_at)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at;
+            """, (key, val_json, now_str))
+        else:
+            cursor.execute("""
+                INSERT INTO store_kv (key, value, updated_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at;
+            """, (key, val_json, now_str))
+            conn.commit()
+    except Exception as e:
+        print("[WARN] db_set_key fallback notice:", str(e))
+        import sqlite3
+        conn = sqlite3.connect("loom_data.db", check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("CREATE TABLE IF NOT EXISTS store_kv (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT);")
+        val_json = json.dumps(val)
+        now_str = datetime.utcnow().isoformat()
         cursor.execute("""
             INSERT INTO store_kv (key, value, updated_at)
             VALUES (?, ?, ?)
