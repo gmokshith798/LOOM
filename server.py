@@ -14,29 +14,40 @@ DB_HOST = os.environ.get("POSTGRES_HOST", "psql.fr-roub1.bengt.wasmernet.com")
 DB_PORT = int(os.environ.get("POSTGRES_PORT", 20184))
 DB_NAME = os.environ.get("POSTGRES_DB", "database_pandu")
 DB_USER = os.environ.get("POSTGRES_USER", "user_2871f50a")
-DB_PASS = os.environ.get("POSTGRES_PASSWORD", "pw_q17jTZgiwpzKPFqs1S2CdLpaqmBaudd0")
+DB_PASS = os.environ.get("POSTGRES_PASSWORD", "pw_q17jTZg1wpzKPFqslS2CdLpaqmBauddO")
+
+USE_POSTGRES = None
+_pg_retry_at = 0  # timestamp after which we retry PG if it previously failed
 
 def get_db():
-    global USE_POSTGRES
-    try:
-        import psycopg2
-        conn = psycopg2.connect(
-            host=DB_HOST,
-            port=DB_PORT,
-            dbname=DB_NAME,
-            user=DB_USER,
-            password=DB_PASS,
-            sslmode="require",
-            connect_timeout=4
-        )
-        conn.autocommit = True
-        USE_POSTGRES = True
-        return conn, "pg"
-    except Exception as e:
-        import sqlite3
-        conn = sqlite3.connect("loom_data.db", check_same_thread=False)
-        USE_POSTGRES = False
-        return conn, "sqlite"
+    global USE_POSTGRES, _pg_retry_at
+    import time
+    # Reset USE_POSTGRES to None after 60 seconds so we retry PG credentials
+    if USE_POSTGRES is False and time.time() > _pg_retry_at:
+        USE_POSTGRES = None
+    if USE_POSTGRES is not False:
+        try:
+            import psycopg2
+            conn = psycopg2.connect(
+                host=DB_HOST,
+                port=DB_PORT,
+                dbname=DB_NAME,
+                user=DB_USER,
+                password=DB_PASS,
+                sslmode="require",
+                connect_timeout=2
+            )
+            conn.autocommit = True
+            USE_POSTGRES = True
+            return conn, "pg"
+        except Exception as e:
+            USE_POSTGRES = False
+            _pg_retry_at = time.time() + 60  # retry after 60 seconds
+    # Fallback to SQLite — use absolute path next to server.py for stability
+    import sqlite3
+    db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "loom_data.db")
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    return conn, "sqlite"
 
 def init_db():
     try:
